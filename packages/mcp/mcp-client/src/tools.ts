@@ -15,6 +15,7 @@
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
@@ -32,6 +33,14 @@ export interface ToolBridgeOptions {
   registrationFailure: 'contain' | 'throw'
   serverName: string
   toolCallTimeoutMs: number
+  /**
+   * Called when a tool call fails because the server no longer recognizes this
+   * MCP session. The session-bearing transport cannot recover by itself — the
+   * SDK replays the dead id on every later call — so the owner rebuilds the
+   * generation and the next call initializes a fresh session. The failing call
+   * still fails, which is exactly what Claude Code does.
+   */
+  onExpiredSession?: ((client: Client) => void) | undefined
 }
 
 /** State for one sync generation: the current set of disposers keyed by public name. */
@@ -75,6 +84,21 @@ function listToolsUncached(client: Client, cursor?: string) {
     { method: 'tools/list', ...cursor === undefined ? {} : { params: { cursor } } },
     ListToolsResultSchema,
   )
+}
+
+/**
+ * Whether an error means the server no longer recognizes this MCP session.
+ *
+ * The Streamable HTTP transport throws `StreamableHTTPError` carrying the HTTP
+ * status, and the MCP gateway answers a garbage-collected session with
+ * `404 {"error":"session not found"}`. A 404 on a session-bearing POST is that
+ * case: the spec says the client starts a new session rather than replaying one
+ * the server has forgotten.
+ * @param error - the rejection from a `tools/call`.
+ * @returns whether the session behind the call is gone.
+ */
+function isExpiredSessionError(error: unknown): boolean {
+  return error instanceof StreamableHTTPError && error.code === 404
 }
 
 /** Call without the SDK pre-validating an output schema the bridge may not support. */
@@ -327,7 +351,10 @@ function createExecutor(
     // string/number/null). Fallback to {} lets the MCP server produce a
     // specific "missing required param" error the model can learn from.
     const argsObj = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
-    const result = await callToolUncached(client, rawName, argsObj, exec, opts)
+    const result = await callToolUncached(client, rawName, argsObj, exec, opts).catch((error: unknown) => {
+      if (isExpiredSessionError(error)) opts.onExpiredSession?.(client)
+      throw error
+    })
 
     // The SDK may return a legacy `toolResult` shape; normalize to content array.
     if (!Array.isArray(result.content)) {

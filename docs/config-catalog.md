@@ -1555,6 +1555,13 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
+  /**
+   * OAuth 2.1 authorization for a server that requires a bearer token. Omitting
+   * it sends only {@link headers}. With it, the SDK discovers the authorization
+   * server and registers a client; the first connection prompts for a one-time
+   * browser login whose tokens are then stored and refreshed automatically.
+   */
+  auth?: AuthConfig
   /** Per-tool-call timeout in milliseconds. */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
@@ -1574,9 +1581,21 @@ export interface ReconnectConfig {
   /** Consecutive failed attempts per outage before giving up for good (default 10). */
   maxAttempts?: number
 }
+
+/** Resolved `auth` config for one remote server. */
+export interface AuthConfig {
+  /** JSON file holding the client registration, the PKCE verifier and the tokens. */
+  readonly storePath: string
+  /** Redirect URI the authorization server returns the code to; a local listener answers it. */
+  readonly redirectUrl: string
+  /** Space-separated scopes requested at authorization. */
+  readonly scope: string
+  /** Human-readable client name sent with dynamic registration. */
+  readonly clientName: string
+}
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:107`](../packages/mcp/mcp-client/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 

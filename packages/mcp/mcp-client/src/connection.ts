@@ -19,6 +19,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
+import { authorize, FileOAuthProvider } from './auth.ts'
 import { createTransport } from './transport.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
@@ -126,6 +128,14 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
     registrationFailure: 'contain',
     serverName: config.serverName,
     toolCallTimeoutMs: config.toolCallTimeoutMs,
+    // A tool call that finds the gateway has forgotten this session must rebuild
+    // the generation: the transport keeps replaying the dead session id, so
+    // without this every later call to this server fails. This is the recovery
+    // Claude Code performs, and it costs one failed call rather than a keepalive
+    // that would defeat the gateway's idle-session GC and its session cap.
+    onExpiredSession: (generation) => {
+      if (isCurrent(generation)) generationDown(generation)
+    },
   }
   // The initial sync uses 'throw' when failOnStartupError is configured, so
   // a registration conflict propagates to the startup-await path. Re-syncs
@@ -133,6 +143,13 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
   const startupOpts: ToolBridgeOptions = config.failOnStartupError
     ? { ...opts, registrationFailure: 'throw' }
     : opts
+  // One provider for this server's whole lifetime: tokens, the client
+  // registration and the PKCE verifier must survive reconnects, and the
+  // redirect and the code exchange must see the same object.
+  const authProvider = config.transport === 'streamable-http' && config.auth !== undefined
+    ? new FileOAuthProvider(config.auth)
+    : undefined
+  const endpoint = config.transport === 'streamable-http' ? config.url : undefined
 
   let disposed = false
   /** Current generation: the connecting or connected client; undefined during backoff waits and after final failure. */
@@ -240,6 +257,10 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       { capabilities: {} },
     )
     const closed: PromiseWithResolvers<void> = Promise.withResolvers()
+    // The interactive authorization leg blocks the attempt; tie it to this
+    // generation so disposal or a transport close abandons the wait.
+    const authorizationAbort = new AbortController()
+    void closed.promise.then(() => authorizationAbort.abort())
     let attemptSettled = false
     let closeObserved = false
     const hasClosed = (): boolean => closeObserved
@@ -268,8 +289,29 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         }
       },
     )
+    /**
+     * Connect, satisfying an OAuth challenge when the server issues one. The
+     * SDK's transport calls `redirectToAuthorization` and then throws
+     * `UnauthorizedError`; the operator completes one browser login, the tokens
+     * land in the provider's store, and the retry connects on its own.
+     */
+    const connectGeneration = async (): Promise<void> => {
+      const attempt = (): Promise<void> => generation.connect(createTransport(config, authProvider))
+      try {
+        await attempt()
+      } catch (error) {
+        if (authProvider === undefined || endpoint === undefined || !(error instanceof UnauthorizedError)) {
+          throw error
+        }
+        ctx.logger.info(`${label}: authorization required — one browser login completes this server`)
+        await authorize(authProvider, endpoint, authorizationAbort.signal, (url) => {
+          ctx.logger.warn(`${label}: open this URL to authorize: ${url.href}`)
+        })
+        await attempt()
+      }
+    }
     try {
-      await generation.connect(createTransport(config))
+      await connectGeneration()
       if (hasClosed()) {
         attemptSettled = true
         generationDown(generation)

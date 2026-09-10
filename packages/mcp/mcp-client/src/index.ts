@@ -19,11 +19,13 @@ import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
+import type { AuthConfig } from './auth.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
 
 export type { McpResult } from './tools.ts'
 export type { ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+export type { AuthConfig } from './auth.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-client'
@@ -86,6 +88,13 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
+  /**
+   * OAuth 2.1 authorization for a server that requires a bearer token. Omitting
+   * it sends only {@link headers}. With it, the SDK discovers the authorization
+   * server and registers a client; the first connection prompts for a one-time
+   * browser login whose tokens are then stored and refreshed automatically.
+   */
+  auth?: AuthConfig
   /** Per-tool-call timeout in milliseconds. */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
@@ -110,6 +119,16 @@ const Reconnect: z<ReconnectConfig> = z.object({
   maxAttempts: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(RECONNECT_DEFAULTS.maxAttempts),
 })
 
+/** Default redirect URI the one-shot authorization listener binds. */
+export const DEFAULT_AUTHORIZATION_REDIRECT_URL = 'http://127.0.0.1:8976/callback'
+
+const Auth: z<AuthConfig> = z.object({
+  storePath: z.string().required(),
+  redirectUrl: z.string().default(DEFAULT_AUTHORIZATION_REDIRECT_URL),
+  scope: z.string().default('openid email profile'),
+  clientName: z.string().default('dsh-mcp-client'),
+})
+
 export const Config = z.union([
   z.object({
     transport: z.const('stdio'),
@@ -127,6 +146,7 @@ export const Config = z.union([
     serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
     url: z.string().required(),
     headers: z.dict(String).default({}),
+    auth: Auth,
     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
     failOnStartupError: z.boolean().default(false),
     reconnect: Reconnect,
