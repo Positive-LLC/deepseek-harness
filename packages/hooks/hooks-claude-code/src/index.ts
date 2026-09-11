@@ -99,8 +99,10 @@ export function apply(ctx: Context, config: Config): void {
   const defaultTimeoutMs = config.defaultTimeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS
   // Parse once at load. A read or parse failure logs and registers nothing.
   let parsed: ClaudeCodeHookConfig = {}
+  let settingsEnv: Record<string, string> = {}
   try {
     const raw: unknown = JSON.parse(readFileSync(config.configPath, 'utf8'))
+    settingsEnv = readSettingsEnv(raw, message => ctx.logger.warn(`hooks-claude-code: ${message}`))
     const result = parseClaudeCodeConfig(raw, {
       ...config.pluginRoot !== undefined ? { pluginRoot: config.pluginRoot } : {},
       ...config.projectDir !== undefined ? { projectDir: config.projectDir } : {},
@@ -147,7 +149,13 @@ export function apply(ctx: Context, config: Config): void {
     // CLAUDE_PROJECT_DIR: an explicit config value wins; otherwise default it to the session
     // workspace (the same dir the hook runs in).
     const projectDir = config.projectDir ?? workdir
-    const hookEnv = projectDir !== undefined ? { CLAUDE_PROJECT_DIR: projectDir } : undefined
+    // The settings `env` block is the environment Claude Code gives the session's own
+    // commands, so a hook process must see it too. An explicit config projectDir still wins.
+    const hookEnvEntries: Record<string, string> = {
+      ...settingsEnv,
+      ...projectDir !== undefined ? { CLAUDE_PROJECT_DIR: projectDir } : {},
+    }
+    const hookEnv = Object.keys(hookEnvEntries).length > 0 ? hookEnvEntries : undefined
     for (const group of groups) {
       if (!matchesMatcher(group.matcher, matchQuery, 'claude-code')) continue
       for (const hook of group.hooks) {
@@ -334,6 +342,31 @@ function sessionStartPayload(agent: Agent, source: string): Record<string, unkno
 function promptPayload(agent: Agent, content: ContentBlock[]): Record<string, unknown> {
   return { ...base(agent, 'UserPromptSubmit'), prompt: blocksToText(content) }
 }
+/**
+ * Read Claude Code's settings `env` block: the environment the session's own
+ * commands run in, so a hook process has to see it. Without it a gate configured
+ * only there falls back to its own default — and a dormant gate's default answer
+ * is a pass, which looks exactly like a gate that approved.
+ * @param raw - the parsed settings document.
+ * @param warn - sink for values that are not the string-to-string shape CC defines.
+ * @returns the string-valued entries, or empty when the block is absent or malformed.
+ */
+function readSettingsEnv(raw: unknown, warn: (message: string) => void): Record<string, string> {
+  if (typeof raw !== 'object' || raw === null) return {}
+  const env = (raw as { env?: unknown }).env
+  if (env === undefined) return {}
+  if (typeof env !== 'object' || env === null || Array.isArray(env)) {
+    warn('ignoring a settings "env" that is not an object')
+    return {}
+  }
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
+    if (typeof value === 'string') out[key] = value
+    else warn(`ignoring settings "env.${key}": expected a string, got ${typeof value}`)
+  }
+  return out
+}
+
 function preToolPayload(exec: ToolExecution): Record<string, unknown> {
   return { ...base(exec.agent, 'PreToolUse'), tool_name: exec.name, tool_input: exec.arguments, tool_use_id: exec.callId }
 }

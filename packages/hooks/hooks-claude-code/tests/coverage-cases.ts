@@ -33,8 +33,9 @@ function dir(): string { const d = mkdtempSync(join(tmpdir(), 'dsh-hc-cov-')); d
 function sh(d: string, name: string, body: string): string {
   const p = join(d, name); writeFileSync(p, body); chmodSync(p, 0o755); return p
 }
-function hooks(d: string, h: unknown): string {
-  writeFileSync(join(d, 'hooks.json'), JSON.stringify({ hooks: h })); return join(d, 'hooks.json')
+function hooks(d: string, h: unknown, env?: Record<string, string>): string {
+  writeFileSync(join(d, 'hooks.json'), JSON.stringify({ ...env ? { env } : {}, hooks: h }))
+  return join(d, 'hooks.json')
 }
 
 type HarnessOpts = { pluginRoot?: string; projectDir?: string; stderrSummaryMaxChars?: number; sessionRoot?: string }
@@ -478,6 +479,24 @@ export function defineCoverageCases(group: CoverageGroup): void {
       await waitForIdle(ctx, handle.agent)
       expect(events(handle.agent).some(e => e.type === 'user/message'
       && e.data.content.some(b => b.type === 'text' && b.text.includes(`dir=${workspace}`)))).toBe(true)
+      await handle.dispose()
+    })
+
+    it('passes the settings env block to hook processes', async () => {
+    // Claude Code's settings `env` is the environment for the session's own commands, so a hook
+    // must see it. A gate configured only there otherwise falls back to its own default, and a
+    // dormant gate's default answer is a pass — indistinguishable from an approving gate.
+      const d = dir()
+      const s = sh(d, 'ctx.sh', '#!/usr/bin/env bash\nprintf \'{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"probe=%s"}}\' "$PROBE_SETTING"\n')
+      const path = hooks(d, { UserPromptSubmit: [{ hooks: [{ type: 'command', command: s }] }] }, { PROBE_SETTING: 'from-settings-env' })
+      const adapter = new MockAdapter([textResponse('ran')])
+      const ctx = await harness(path, adapter)
+      const { SessionId } = await import('@deepseek-ai/dsh-session')
+      const handle = await ctx.agents.create({ sessionId: SessionId('s1'), meta: { cwd: d }, agentOptions: { provider: 'mock', model: 'mock' } })
+      handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await waitForIdle(ctx, handle.agent)
+      expect(events(handle.agent).some(e => e.type === 'user/message'
+        && e.data.content.some(b => b.type === 'text' && b.text.includes('probe=from-settings-env')))).toBe(true)
       await handle.dispose()
     })
 
