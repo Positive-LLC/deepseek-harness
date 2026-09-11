@@ -3035,6 +3035,13 @@ export interface Config {
    */
   toolName?: string
   /**
+   * Tool description for the model, prefixed to the generated wording. Omit it and
+   * every instance shares the provider's generic text, so a delegation tool per
+   * subagent type cannot say when it applies. A row carrying this key against a
+   * build without the field mounts anyway and silently loses it.
+   */
+  description?: string
+  /**
    * Sample the Host `subagent-model-selection` setting for each new top-level
    * Session and inherit that decision in its child Sessions.
    */

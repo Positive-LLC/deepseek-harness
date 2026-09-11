@@ -54,6 +54,13 @@ export interface Config {
    */
   toolName?: string
   /**
+   * Tool description for the model, prefixed to the generated wording. Omit it and
+   * every instance shares the provider's generic text, so a delegation tool per
+   * subagent type cannot say when it applies. A row carrying this key against a
+   * build without the field mounts anyway and silently loses it.
+   */
+  description?: string
+  /**
    * Sample the Host `subagent-model-selection` setting for each new top-level
    * Session and inherit that decision in its child Sessions.
    */
@@ -105,6 +112,7 @@ export interface Config {
 export const Config: z<Config> = z.object({
   provider: z.string().required(),
   toolName: z.string().default('subagent'),
+  description: z.string(),
   modelSelectionSettings: z.boolean().default(false),
   enableRunInBackground: z.boolean().default(true),
   backgroundMode: z.union(['one-shot', 'continuable'] as const).default('one-shot'),
@@ -378,7 +386,8 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             : '')
       const disposeTool = runtimeCtx.tools.register(defineTool({
         name: toolName,
-        description: wording.description + (backgroundEnabled
+        description: (config.description === undefined ? '' : config.description + ' ')
+          + wording.description + (backgroundEnabled
           // The completion notice is the continuation service's own behavior, not
           // a separately installed capability, so this promise holds whenever the
           // continuable background path is reachable at all.
